@@ -194,7 +194,7 @@ static ssize_t memtype_sysfs_show(struct kobject *kobj,
 		if (type == memtype->type)
 			size += memdesc->size;
 
-		kgsl_mem_entry_put(entry);
+		kgsl_mem_entry_put_deferred(entry);
 		spin_lock(&priv->mem_lock);
 	}
 	spin_unlock(&priv->mem_lock);
@@ -268,8 +268,18 @@ imported_mem_show(struct kgsl_process_private *priv,
 				imported_mem += size;
 			}
 		}
-
-		kgsl_mem_entry_put(entry);
+		/*
+		 * If refcount on mem entry is the last refcount, we will
+		 * call kgsl_mem_entry_destroy and detach it from process
+		 * list. When there is no refcount on the process private,
+		 * we will call kgsl_destroy_process_private to do cleanup.
+		 * During cleanup, we will try to remove the same sysfs
+		 * node which is in use by the current thread and this
+		 * situation will end up in a deadloack.
+		 * To avoid this situation, use a worker to put the refcount
+		 * on mem entry.
+		 */
+		kgsl_mem_entry_put_deferred(entry);
 		spin_lock(&priv->mem_lock);
 	}
 	spin_unlock(&priv->mem_lock);
