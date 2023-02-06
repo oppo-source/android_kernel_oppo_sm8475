@@ -86,6 +86,7 @@
 
 #include "pgalloc-track.h"
 #include "internal.h"
+#include <trace/hooks/mm.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/pagefault.h>
@@ -3141,6 +3142,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 				put_page(old_page);
 			return 0;
 		}
+		trace_android_vh_cow_user_page(vmf, new_page);
 	}
 
 	if (mem_cgroup_charge(new_page, mm, GFP_KERNEL))
@@ -3782,6 +3784,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		do_page_add_anon_rmap(page, vma, vmf->address, exclusive);
 	}
 
+	trace_android_vh_swapin_add_anon_rmap(vmf, page);
 	swap_free(entry);
 	if (mem_cgroup_swap_full(page) ||
 	    (vmf->vma_flags & VM_LOCKED) || PageMlocked(page))
@@ -3994,11 +3997,20 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 		return ret;
 
 	if (unlikely(PageHWPoison(vmf->page))) {
-		if (ret & VM_FAULT_LOCKED)
-			unlock_page(vmf->page);
-		put_page(vmf->page);
+		struct page *page = vmf->page;
+		vm_fault_t poisonret = VM_FAULT_HWPOISON;
+		if (ret & VM_FAULT_LOCKED) {
+			if (page_mapped(page))
+				unmap_mapping_pages(page_mapping(page),
+						    page->index, 1, false);
+			/* Retry if a clean page was removed from the cache. */
+			if (invalidate_inode_page(page))
+				poisonret = VM_FAULT_NOPAGE;
+			unlock_page(page);
+		}
+		put_page(page);
 		vmf->page = NULL;
-		return VM_FAULT_HWPOISON;
+		return poisonret;
 	}
 
 	if (unlikely(!(ret & VM_FAULT_LOCKED)))
@@ -4751,6 +4763,7 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 		if (vmf->flags & FAULT_FLAG_WRITE)
 			flush_tlb_fix_spurious_fault(vmf->vma, vmf->address);
 	}
+	trace_android_vh_handle_pte_fault_end(vmf, highest_memmap_pfn);
 unlock:
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	return ret;

@@ -60,6 +60,8 @@
 #include <linux/dma-iommu.h>
 #include <asm/arch_timer.h>
 
+#include <trace/events/rproc_qcom.h>
+
 #define CREATE_TRACE_POINTS
 #include <trace/events/fastrpc.h>
 
@@ -106,9 +108,6 @@
 /* Process status notifications from DSP will be sent with this unique context */
 #define FASTRPC_NOTIF_CTX_RESERVED 0xABCDABCD
 
-/* Notification worker thread device cid */
-#define NOTIF_DEV_CID 0x10000
-
 /*
  * Fastrpc context ID bit-map:
  *
@@ -119,7 +118,6 @@
  * bits 16-63 : incrementing context ID
  */
 #define FASTRPC_CTX_MAX (1024)
-
 #define FASTRPC_CTX_JOB_TYPE_POS (4)
 #define FASTRPC_CTX_TABLE_IDX_POS (6)
 #define FASTRPC_CTX_JOBID_POS (16)
@@ -217,6 +215,7 @@
 #define PERF_CAPABILITY_SUPPORT	(1 << 1)
 #define KERNEL_ERROR_CODE_V1_SUPPORT	1
 #define USERSPACE_ALLOCATION_SUPPORT	1
+#define NOTIF_V2_SUPPORT	1
 
 #define MD_GMSG_BUFFER (1000)
 
@@ -776,8 +775,10 @@ static uint32_t kernel_capabilities[FASTRPC_MAX_ATTRIBUTES -
 	/* PERF_LOGGING_V2_SUPPORT feature is supported, unsupported = 0 */
 	KERNEL_ERROR_CODE_V1_SUPPORT,
 	/* Fastrpc Driver error code changes present */
-	USERSPACE_ALLOCATION_SUPPORT
+	USERSPACE_ALLOCATION_SUPPORT,
 	/* Userspace allocation allowed for DSP memory request*/
+	0,
+	NOTIF_V2_SUPPORT
 };
 
 static inline void fastrpc_pm_awake(struct fastrpc_file *fl, int channel_type);
@@ -990,7 +991,8 @@ static int fastrpc_minidump_add_region(struct fastrpc_mmap *map)
 		ret_val = msm_minidump_add_region(&md_entry);
 		if (ret_val < 0) {
 			ADSPRPC_ERR(
-			"Failed to add/update CMA to Minidump for phys: 0x%llx, size: %zu, md_index %d, md_entry.name %s\n",
+			"Failed to add/update with err %d CMA to Minidump for phys: 0x%llx, size: %zu, md_index %d, md_entry.name %s\n",
+			ret_val,
 			map->phys,
 			map->size, md_index,
 			md_entry.name);
@@ -1025,8 +1027,8 @@ static int fastrpc_minidump_remove_region(struct fastrpc_mmap *map)
 		err = msm_minidump_remove_region(&md_entry);
 		if (err < 0) {
 			ADSPRPC_ERR(
-				"Failed to remove CMA from Minidump for phys: 0x%llx, size: %zu index = %d\n",
-				 map->phys, map->size, map->frpc_md_index);
+				"Failed to remove CMA with err %d from Minidump for phys: 0x%llx, size: %zu index = %d\n",
+				 err, map->phys, map->size, map->frpc_md_index);
 		} else {
 			reset_unique_index(map->frpc_md_index);
 			map->frpc_md_index = -1;
@@ -2130,7 +2132,11 @@ static int context_alloc(struct fastrpc_file *fl, uint32_t kernel,
 		if (err)
 			goto bail;
 	}
-
+	VERIFY(err, VALID_FASTRPC_CID(cid));
+	if (err) {
+		err = -ECHRNG;
+		goto bail;
+	}
 	chan = &me->channel[cid];
 
 	spin_lock_irqsave(&chan->ctxlock, irq_flags);
@@ -2292,8 +2298,8 @@ static void fastrpc_notif_find_process(int domain, struct smq_notif_rspv3 *notif
 
 	spin_lock_irqsave(&me->hlock, irq_flags);
 	hlist_for_each_entry_safe(fl, n, &me->drivers, hn) {
-		if ((fl->tgid == notif->pid || (fl->tgid == (notif->pid & PROCESS_ID_MASK)))
-						&& (fl->cid == NOTIF_DEV_CID)) {
+		if (fl->tgid == notif->pid ||
+				(fl->tgid == (notif->pid & PROCESS_ID_MASK))) {
 			is_process_found = true;
 			break;
 		}
@@ -2470,10 +2476,10 @@ static void fastrpc_notify_drivers(struct fastrpc_apps *me, int cid)
 
 	spin_lock_irqsave(&me->hlock, irq_flags);
 	hlist_for_each_entry_safe(fl, n, &me->drivers, hn) {
-		if (fl->cid == cid)
-			fastrpc_notify_users(fl);
-		else if (fl->cid == NOTIF_DEV_CID)
+		if (fl->cid == cid) {
 			fastrpc_queue_pd_status(fl, cid, FASTRPC_DSP_SSR, 0);
+			fastrpc_notify_users(fl);
+		}
 	}
 	spin_unlock_irqrestore(&me->hlock, irq_flags);
 }
@@ -3870,6 +3876,12 @@ static int fastrpc_init_attach_process(struct fastrpc_file *fl,
 	remote_arg_t ra[1];
 	struct fastrpc_ioctl_invoke_async ioctl;
 
+	if (fl->dev_minor == MINOR_NUM_DEV) {
+		err = -ECONNREFUSED;
+		ADSPRPC_ERR(
+			"untrusted app trying to attach to privileged DSP PD\n");
+		return err;
+	}
 	/*
 	 * Prepare remote arguments for creating thread group
 	 * in guestOS/staticPD on the remote subsystem.
@@ -4148,6 +4160,13 @@ static int fastrpc_init_create_static_process(struct fastrpc_file *fl,
 		unsigned int pageslen;
 	} inbuf;
 
+	if (fl->dev_minor == MINOR_NUM_DEV) {
+		err = -ECONNREFUSED;
+		ADSPRPC_ERR(
+			"untrusted app trying to attach to audio PD\n");
+		return err;
+	}
+
 	if (!init->filelen)
 		goto bail;
 
@@ -4318,6 +4337,9 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 		break;
 	case FASTRPC_INIT_CREATE:
 		err = fastrpc_init_create_dynamic_process(fl, uproc);
+		if (err)
+			goto bail;
+		VERIFY(err, 0 == (err = fastrpc_device_create(fl)));
 		break;
 	case FASTRPC_INIT_CREATE_STATIC:
 		err = fastrpc_init_create_static_process(fl, init);
@@ -4329,9 +4351,6 @@ static int fastrpc_init_process(struct fastrpc_file *fl,
 	if (err)
 		goto bail;
 	fl->dsp_proc_init = 1;
-	VERIFY(err, 0 == (err = fastrpc_device_create(fl)));
-	if (err)
-		goto bail;
 bail:
 	return err;
 }
@@ -6102,9 +6121,6 @@ static int fastrpc_set_process_info(struct fastrpc_file *fl, uint32_t cid)
 	if (current->tgid != fl->tgid_open)
 		fl->untrusted_process = true;
 
-	if (cid == NOTIF_DEV_CID)
-		goto bail;
-
 	snprintf(strpid, PID_SIZE, "%d", current->pid);
 	if (debugfs_root) {
 		VERIFY(err, VALID_FASTRPC_CID(cid));
@@ -6185,11 +6201,6 @@ static int fastrpc_get_info(struct fastrpc_file *fl, uint32_t *info)
 	VERIFY(err, !fastrpc_session_exists(me, cid, fl->tgid));
 	if (err) {
 		err = -EEXIST;
-		goto bail;
-	}
-
-	if (cid == NOTIF_DEV_CID) {
-		fl->cid = cid;
 		goto bail;
 	}
 	if (fl->cid == -1) {
@@ -7017,6 +7028,8 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 	cid = ctx - &me->channel[0];
 	switch (code) {
 	case QCOM_SSR_BEFORE_SHUTDOWN:
+		trace_rproc_qcom_event(gcinfo[cid].subsys,
+			"QCOM_SSR_BEFORE_SHUTDOWN", "fastrpc_restart_notifier-enter");
 		pr_info("adsprpc: %s: %s subsystem is restarting\n",
 			__func__, gcinfo[cid].subsys);
 		mutex_lock(&me->channel[cid].smd_mutex);
@@ -7027,6 +7040,8 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 			me->staticpd_flags = 0;
 		break;
 	case QCOM_SSR_AFTER_SHUTDOWN:
+		trace_rproc_qcom_event(gcinfo[cid].subsys,
+			"QCOM_SSR_AFTER_SHUTDOWN", "fastrpc_restart_notifier-enter");
 		if (cid == RH_CID) {
 			if (me->ramdump_handle)
 				me->channel[RH_CID].ramdumpenabled = 1;
@@ -7035,6 +7050,8 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 			__func__, gcinfo[cid].subsys);
 		break;
 	case QCOM_SSR_BEFORE_POWERUP:
+		trace_rproc_qcom_event(gcinfo[cid].subsys,
+			"QCOM_SSR_BEFORE_POWERUP", "fastrpc_restart_notifier-enter");
 		if (cid == RH_CID && dump_enabled()) {
 			if (me->ramdump_handle && me->channel[RH_CID]
 					.ramdumpenabled) {
@@ -7053,6 +7070,8 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 		fastrpc_notify_drivers(me, cid);
 		break;
 	case QCOM_SSR_AFTER_POWERUP:
+		trace_rproc_qcom_event(gcinfo[cid].subsys,
+			"QCOM_SSR_AFTER_POWERUP", "fastrpc_restart_notifier-enter");
 		pr_info("adsprpc: %s: %s subsystem is up\n",
 			__func__, gcinfo[cid].subsys);
 		ctx->issubsystemup = 1;
@@ -7060,6 +7079,8 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 	default:
 		break;
 	}
+
+	trace_rproc_qcom_event(dev_name(me->dev), "fastrpc_restart_notifier", "exit");
 	return NOTIFY_DONE;
 }
 
@@ -7599,17 +7620,20 @@ long fastrpc_driver_invoke(struct fastrpc_device *dev, unsigned int invoke_num,
 		spin_unlock(&fl->hlock);
 		spin_unlock_irqrestore(&me->hlock, irq_flags);
 		mutex_lock(&fl->internal_map_mutex);
-
+		mutex_lock(&fl->map_mutex);
 		if (!fastrpc_mmap_find(fl, -1, p.unmap->buf, 0, 0, ADSP_MMAP_DMA_BUFFER, 0, &map)) {
 			/* Un-map DMA buffer on DSP*/
+			mutex_unlock(&fl->map_mutex);
 			VERIFY(err, !(err = fastrpc_munmap_on_dsp(fl, map->raddr,
 				map->phys, map->size, map->flags)));
 			if (err) {
 				mutex_unlock(&fl->internal_map_mutex);
 				break;
 			}
+			mutex_lock(&fl->map_mutex);
 			fastrpc_mmap_free(map, 0);
 		}
+		mutex_unlock(&fl->map_mutex);
 		mutex_unlock(&fl->internal_map_mutex);
 		break;
 	default:

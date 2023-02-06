@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
+CFLAGS_fsa4480-i2c.o += -I$(srctree)/drivers/usb/typec/tcpc/inc
 CFLAGS_rpmh-rsc.o := -I$(src)
 obj-$(CONFIG_QCOM_AOSS_QMP) +=	qcom_aoss.o
 obj-$(CONFIG_QCOM_GENI_SE) +=	qcom-geni-se.o
@@ -50,6 +51,7 @@ obj-$(CONFIG_QCOM_RIMPS) += qcom_rimps.o
 obj-$(CONFIG_QCOM_RUN_QUEUE_STATS) += rq_stats.o
 obj-$(CONFIG_QCOM_APR) += apr.o
 obj-$(CONFIG_QCOM_LLCC) += llcc-qcom.o
+llcc-qcom-y += llcc_qcom.o llcc-tcm.o
 obj-$(CONFIG_QCOM_MINIDUMP) += minidump.o
 minidump-y	 += msm_minidump.o minidump_log.o
 minidump-$(CONFIG_QCOM_MINIDUMP_PANIC_DUMP) += minidump_memory.o
