@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <linux/errno.h>
 #include <linux/devfreq.h>
@@ -380,18 +381,20 @@ static int tz_get_target_freq(struct devfreq *devfreq, unsigned long *freq)
 	 * Do not waste CPU cycles running this algorithm if
 	 * the GPU just started, or if less than FLOOR time
 	 * has passed since the last run or the gpu hasn't been
-	 * busier than MIN_BUSY.
+	 * busier than MIN_BUSY or there is only 1 power level
 	 */
-	if ((stats->total_time == 0) ||
-		(priv->bin.total_time < FLOOR) ||
-		(unsigned int) priv->bin.busy_time < MIN_BUSY) {
-		return 0;
-	}
 
 	level = devfreq_get_freq_level(devfreq, stats->current_frequency);
 	if (level < 0) {
 		pr_err(TAG "bad freq %ld\n", stats->current_frequency);
 		return level;
+	}
+
+	if ((stats->total_time == 0) ||
+		(priv->bin.total_time < FLOOR) ||
+		devfreq->profile->max_state == 1 ||
+		((unsigned int) priv->bin.busy_time < MIN_BUSY && level == (devfreq->profile->max_state - 1))) {
+		return 0;
 	}
 
 	/*

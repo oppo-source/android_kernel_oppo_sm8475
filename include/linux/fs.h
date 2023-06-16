@@ -467,7 +467,7 @@ struct address_space {
 	struct rb_root_cached	i_mmap;
 	struct rw_semaphore	i_mmap_rwsem;
 	unsigned long		nrpages;
-	unsigned long		nrexceptional;
+	unsigned long           nrexceptional;
 	pgoff_t			writeback_index;
 	const struct address_space_operations *a_ops;
 	unsigned long		flags;
@@ -476,7 +476,15 @@ struct address_space {
 	struct list_head	private_list;
 	void			*private_data;
 
+	/*
+	 * android common kernel disabled CONFIG_READ_ONLY_THP_FOR_FS but we need nr_thps
+	 * avoiding modifying the data struct, we re-use reserved field for it
+	 */
+#if !defined(CONFIG_READ_ONLY_THP_FOR_FS) && defined(CONFIG_CONT_PTE_HUGEPAGE)
+	ANDROID_KABI_USE(1, atomic_t nr_thps);
+#else
 	ANDROID_KABI_RESERVE(1);
+#endif
 	ANDROID_KABI_RESERVE(2);
 	ANDROID_KABI_RESERVE(3);
 	ANDROID_KABI_RESERVE(4);
@@ -513,6 +521,11 @@ static inline int i_mmap_trylock_write(struct address_space *mapping)
 static inline void i_mmap_unlock_write(struct address_space *mapping)
 {
 	up_write(&mapping->i_mmap_rwsem);
+}
+
+static inline int i_mmap_trylock_read(struct address_space *mapping)
+{
+	return down_read_trylock(&mapping->i_mmap_rwsem);
 }
 
 static inline void i_mmap_lock_read(struct address_space *mapping)

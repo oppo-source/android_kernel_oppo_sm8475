@@ -537,8 +537,15 @@ retry:
 		mark_page_accessed(page);
 	}
 	if ((flags & FOLL_MLOCK) && (vma->vm_flags & VM_LOCKED)) {
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 		/* Do not mlock pte-mapped THP */
 		if (PageTransCompound(page))
+#else
+		if (PageTransCompound(page) &&
+		    (!ContPteHugePageHead(page) ||
+		     PageDoubleMap(compound_head(page)) ||
+		     PageAnon(page)))
+#endif
 			goto out;
 
 		/*

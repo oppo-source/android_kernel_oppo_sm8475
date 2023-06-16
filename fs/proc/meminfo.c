@@ -19,6 +19,7 @@
 #include <asm/page.h>
 #include "internal.h"
 #include <trace/hooks/mm.h>
+
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
@@ -128,16 +129,31 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 #endif
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	show_val_kb(m, "AnonHugePages:  ",
 		    global_node_page_state(NR_ANON_THPS) * HPAGE_PMD_NR);
+#else
+	show_val_kb(m, "AnonHugePages:  ",
+		    global_node_page_state(NR_ANON_THPS) * HPAGE_CONT_PTE_NR);
+#endif
 	show_val_kb(m, "ShmemHugePages: ",
 		    global_node_page_state(NR_SHMEM_THPS) * HPAGE_PMD_NR);
 	show_val_kb(m, "ShmemPmdMapped: ",
 		    global_node_page_state(NR_SHMEM_PMDMAPPED) * HPAGE_PMD_NR);
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	show_val_kb(m, "FileHugePages:  ",
 		    global_node_page_state(NR_FILE_THPS) * HPAGE_PMD_NR);
 	show_val_kb(m, "FilePmdMapped:  ",
 		    global_node_page_state(NR_FILE_PMDMAPPED) * HPAGE_PMD_NR);
+#else
+	show_val_kb(m, "FileHugePages:  ",
+		    global_node_page_state(NR_FILE_THPS) * HPAGE_CONT_PTE_NR);
+	show_val_kb(m, "FilePmdMapped:  ",
+		    global_node_page_state(NR_FILE_PMDMAPPED) * HPAGE_CONT_PTE_NR);
+	show_val_kb(m, "HugePagePool:   ", cont_pte_pool_total_pages());
+	show_val_kb(m, "DoubleMapTHP:   ",
+		     atomic_long_read(&cont_pte_double_map_count) * HPAGE_CONT_PTE_NR);
+#endif
 #endif
 
 #ifdef CONFIG_CMA
