@@ -284,12 +284,6 @@ static long madvise_willneed(struct vm_area_struct *vma,
 		return -EBADF;
 #endif
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	/* Fixme: bringup hugepage in madvise for odex and oat */
-	if (file_inode(file)->may_cont_pte)
-		return 0;
-#endif
-
 	if (IS_DAX(file_inode(file))) {
 		/* no bad return value, but ignore advice */
 		return 0;
@@ -414,42 +408,6 @@ regular_page:
 		if (!pte_present(ptent))
 			continue;
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		if (pte_cont(ptent)) {
-			unsigned long next = pte_cont_addr_end(addr, end);
-
-			if (next - addr != HPAGE_CONT_PTE_SIZE) {
-				goto skip;  /* ignore PAGEOUT for partial cont_pte */
-			} else {
-				page = vm_normal_page(vma, addr, ptent);
-				if (!page)
-					goto skip;
-
-				/* Do not interfere with other mappings of this page */
-				if (page_mapcount(page) != 1)
-					goto skip;
-
-				cont_ptep_clear_flush_young_full(vma, addr, pte);
-
-				ClearPageReferenced(page);
-				test_and_clear_page_young(page);
-				if (pageout) {
-					if (!isolate_lru_page(page)) {
-						if (PageUnevictable(page))
-							putback_lru_page(page);
-						else
-							list_add(&page->lru, &page_list);
-					}
-				} else {
-					deactivate_page(page);
-				}
-			}
-skip:
-			pte += (next - PAGE_SIZE - addr)/PAGE_SIZE;
-			addr = next - PAGE_SIZE;
-			continue;
-		}
-#endif
 		page = vm_normal_page(vma, addr, ptent);
 		if (!page)
 			continue;
@@ -459,11 +417,6 @@ skip:
 		 * are sure it's worth. Split it if we are only owner.
 		 */
 		if (PageTransCompound(page)) {
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-			pr_err_ratelimited("%s current:%s-%d non_cont pte thp pageout\n",
-					    __func__, current->comm, current->pid);
-			continue;
-#endif
 			if (page_mapcount(page) != 1)
 				break;
 			get_page(page);
@@ -635,9 +588,6 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 	struct page *page;
 	int nr_swap = 0;
 	unsigned long next;
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	bool cont_pte_head = false;
-#endif
 
 	next = pmd_addr_end(addr, end);
 	if (pmd_trans_huge(*pmd))
@@ -685,35 +635,13 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 		if (PageTransCompound(page)) {
 			if (page_mapcount(page) != 1)
 				goto out;
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-			if (!pte_cont(ptent))
-				continue;
-
-			if (pte_cont(ptent)) {
-				cont_pte_head = PageCont(page) && ContPteHugePageHead(page);
-				next = pte_cont_addr_end(addr, end);
-
-				/*ignore unaligned part or partial cont pte*/
-				if (!cont_pte_head || (next - addr != HPAGE_CONT_PTE_SIZE)) {
-					pte += (next - PAGE_SIZE - addr)/PAGE_SIZE;
-					addr = next - PAGE_SIZE;
-					continue;
-				}else
-					goto out_cont;
-			}
-
-#endif
 			get_page(page);
 			if (!trylock_page(page)) {
 				put_page(page);
 				goto out;
 			}
 			pte_unmap_unlock(orig_pte, ptl);
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-			if (!ContPteHugePage(page) && split_huge_page(page)) {
-#else
 			if (split_huge_page(page)) {
-#endif
 				unlock_page(page);
 				put_page(page);
 				pte_offset_map_lock(mm, pmd, addr, &ptl);
@@ -721,18 +649,14 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 			}
 			unlock_page(page);
 			put_page(page);
-
 			pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 			pte--;
 			addr -= PAGE_SIZE;
 			continue;
 		}
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-out_cont:
-		VM_BUG_ON_PAGE(PageTransCompound(page) && !ContPteHugePage(page), page);
-#else
+
 		VM_BUG_ON_PAGE(PageTransCompound(page), page);
-#endif
+
 		if (PageSwapCache(page) || PageDirty(page)) {
 			if (!trylock_page(page))
 				continue;
@@ -753,14 +677,7 @@ out_cont:
 			ClearPageDirty(page);
 			unlock_page(page);
 		}
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		if (pte_cont(ptent) && cont_pte_head) {
-			cont_pte_set_huge_pte_clean(mm, addr, pte);
-			pte += (next - PAGE_SIZE - addr)/PAGE_SIZE;
-			addr = next - PAGE_SIZE;
-		} else
-#endif
-		{
+
 		if (pte_young(ptent) || pte_dirty(ptent)) {
 			/*
 			 * Some of architecture(ex, PPC) don't update TLB
@@ -776,10 +693,6 @@ out_cont:
 			set_pte_at(mm, addr, pte, ptent);
 			tlb_remove_tlb_entry(tlb, pte, addr);
 		}
-		}
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		BUG_ON(PageCont(page) && !ContPteHugePageHead(page));
-#endif
 		mark_page_lazyfree(page);
 	}
 out:
@@ -1038,21 +951,6 @@ madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		return madvise_pageout(vma, prev, start, end);
 	case MADV_FREE:
 	case MADV_DONTNEED:
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		if (vma_is_chp_anonymous(vma) &&
-		    (!IS_ALIGNED(start, HPAGE_CONT_PTE_SIZE) ||
-		     !IS_ALIGNED((end - start), HPAGE_CONT_PTE_SIZE))) {
-			if (behavior == MADV_FREE)
-				count_vm_chp_event(CHP_MADV_FREE_UNALIGNED);
-			else
-				count_vm_chp_event(CHP_MADV_DONTNEED_UNALIGNED);
-#ifndef CONFIG_CONT_PTE_HUGEPAGE_ON_QEMU
-			chp_logi("%d vma:[0x%lx - 0x%lx] free:0x%lx len:0x%lx\n",
-				 behavior, vma->vm_start, vma->vm_end,
-				 start, end - start);
-#endif
-		}
-#endif
 		return madvise_dontneed_free(vma, prev, start, end, behavior);
 	default:
 		return madvise_behavior(vma, prev, start, end, behavior);

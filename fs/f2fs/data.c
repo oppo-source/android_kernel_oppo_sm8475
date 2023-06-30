@@ -132,27 +132,11 @@ static void f2fs_finish_read_bio(struct bio *bio)
 		struct page *page = bv->bv_page;
 
 		if (f2fs_is_compressed_page(page)) {
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-			/*NOTE: This scenario does not support PageCont!*/
-			BUG_ON(PageCont(page));
-#endif
 			if (bio->bi_status)
 				f2fs_end_read_compressed_page(page, true, 0);
 			f2fs_put_page_dic(page);
 			continue;
 		}
-
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		if (PageCont(page)) {
-			if (bio->bi_status || PageError(page)) {
-				ClearPageUptodate(page);
-				SetPageError(page);
-			}
-
-			set_cont_pte_uptodate_and_unlock(page);
-			continue;
-		}
-#endif
 
 		/* PG_error was set if decryption or verity failed. */
 		if (bio->bi_status || PageError(page)) {

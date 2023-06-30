@@ -2282,17 +2282,10 @@ int __weak arch_prctl_spec_ctrl_set(struct task_struct *t, unsigned long which,
 }
 
 #ifdef CONFIG_MMU
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-static int prctl_update_vma_anon_name(struct vm_area_struct *vma,
-		struct vm_area_struct **prev,
-		unsigned long start, unsigned long end,
-		const char __user *name_addr, bool chp)
-#else
 static int prctl_update_vma_anon_name(struct vm_area_struct *vma,
 		struct vm_area_struct **prev,
 		unsigned long start, unsigned long end,
 		const char __user *name_addr)
-#endif
 {
 	struct mm_struct *mm = vma->vm_mm;
 	int error = 0;
@@ -2327,26 +2320,17 @@ static int prctl_update_vma_anon_name(struct vm_area_struct *vma,
 	}
 
 success:
-	if (!vma->vm_file) {
+	if (!vma->vm_file)
 		vma->anon_name = name_addr;
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		if (chp)
-			vma->vm_flags |= VM_FLAG_CHP;
-#endif
-	}
+
 out:
 	if (error == -ENOMEM)
 		error = -EAGAIN;
 	return error;
 }
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-static int prctl_set_vma_anon_name(unsigned long start, unsigned long end,
-			unsigned long arg, bool chp)
-#else
 static int prctl_set_vma_anon_name(unsigned long start, unsigned long end,
 			unsigned long arg)
-#endif
 {
 	unsigned long tmp;
 	struct vm_area_struct *vma, *prev;
@@ -2382,13 +2366,8 @@ static int prctl_set_vma_anon_name(unsigned long start, unsigned long end,
 			tmp = end;
 
 		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		error = prctl_update_vma_anon_name(vma, &prev, start, tmp,
-				(const char __user *)arg, chp);
-#else
 		error = prctl_update_vma_anon_name(vma, &prev, start, tmp,
 				(const char __user *)arg);
-#endif
 		if (error)
 			return error;
 		start = tmp;
@@ -2411,9 +2390,6 @@ static int prctl_set_vma(unsigned long opt, unsigned long start,
 	int error;
 	unsigned long len;
 	unsigned long end;
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	bool chp = false;
-#endif
 
 	if (start & ~PAGE_MASK)
 		return -EINVAL;
@@ -2430,21 +2406,11 @@ static int prctl_set_vma(unsigned long opt, unsigned long start,
 	if (end == start)
 		return 0;
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	if (opt == PR_SET_VMA_ANON_NAME)
-		chp = chp_handle_prctl_user_addrs((const char __user*)arg,
-						  start, len);
-#endif
-
 	mmap_write_lock(mm);
 
 	switch (opt) {
 	case PR_SET_VMA_ANON_NAME:
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		error = prctl_set_vma_anon_name(start, end, arg, chp);
-#else
 		error = prctl_set_vma_anon_name(start, end, arg);
-#endif
 		break;
 	default:
 		error = -EINVAL;

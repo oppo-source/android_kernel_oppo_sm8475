@@ -27,7 +27,6 @@
 #include <linux/sched/task.h>
 #include <trace/hooks/mm.h>
 
-
 static struct bio *get_swap_bio(gfp_t gfp_flags,
 				struct page *page, bio_end_io_t end_io)
 {
@@ -375,11 +374,6 @@ int swap_readpage(struct page *page, bool synchronous)
 			goto out;
 		}
 	}
-
-#ifdef CONT_PTE_HUGEPAGE_64K_ZRAM
-	//submit not support for readpage fallback now
-	BUG_ON(PageContFallback(page));
-#endif
 
 	ret = 0;
 	bio = get_swap_bio(GFP_KERNEL, page, end_swap_bio_read);

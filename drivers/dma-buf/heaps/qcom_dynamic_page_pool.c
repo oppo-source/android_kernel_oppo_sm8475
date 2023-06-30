@@ -22,9 +22,6 @@
 #include <uapi/linux/sched/types.h>
 
 #include "qcom_dynamic_page_pool.h"
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-#include "chp_ext.h"
-#endif
 
 static LIST_HEAD(pool_list);
 static DEFINE_MUTEX(pool_list_lock);
@@ -150,11 +147,7 @@ void dynamic_page_pool_destroy(struct dynamic_page_pool *pool)
 
 	list_for_each_entry_safe(page, tmp, &pages, lru) {
 		list_del(&page->lru);
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		__free_pages_ext(page, pool->order);
-#else
 		__free_pages(page, pool->order);
-#endif
 	}
 
 	kfree(pool);
@@ -204,11 +197,7 @@ static int dynamic_page_pool_do_shrink(struct dynamic_page_pool *pool, gfp_t gfp
 
 	list_for_each_entry_safe(page, tmp, &pages, lru) {
 		list_del(&page->lru);
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		__free_pages_ext(page, pool->order);
-#else
 		__free_pages(page, pool->order);
-#endif
 	}
 
 	return freed;

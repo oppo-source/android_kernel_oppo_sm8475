@@ -86,12 +86,7 @@ static void __page_cache_release(struct page *page)
 		unsigned long flags;
 
 		spin_lock_irqsave(&pgdat->lru_lock, flags);
-#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
-		if (ContPteCMAHugePageHead(page))
-			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
-		else
-#endif
-			lruvec = mem_cgroup_page_lruvec(page, pgdat);
+		lruvec = mem_cgroup_page_lruvec(page, pgdat);
 		VM_BUG_ON_PAGE(!PageLRU(page), page);
 		__ClearPageLRU(page);
 		del_page_from_lru_list(page, lruvec, page_off_lru(page));
@@ -117,9 +112,6 @@ static void __put_compound_page(struct page *page)
 	 */
 	if (!PageHuge(page))
 		__page_cache_release(page);
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	BUG_ON(PageCont(page) && !PageError(page) && !PageUptodate(page));
-#endif
 	destroy_compound_page(page);
 }
 
@@ -233,12 +225,7 @@ static void pagevec_lru_move_fn(struct pagevec *pvec,
 			spin_lock_irqsave(&pgdat->lru_lock, flags);
 		}
 
-#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
-		if (ContPteCMAHugePageHead(page))
-			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
-		else
-#endif
-			lruvec = mem_cgroup_page_lruvec(page, pgdat);
+		lruvec = mem_cgroup_page_lruvec(page, pgdat);
 		(*move_fn)(page, lruvec, arg);
 	}
 	if (pgdat)
@@ -276,24 +263,6 @@ static void pagevec_move_tail(struct pagevec *pvec)
 static bool pagevec_add_and_need_flush(struct pagevec *pvec, struct page *page)
 {
 	bool ret = false;
-
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	/*
-	 * FIXME: Detect the tail page of a
-	 * cont-pte hugepage is added to an lru
-	 */
-	if ((PageCont(page) && !PageHead(page)) || PageContRefill(page)) {
-		pr_err("@%s:%d comm:%s pid:%d page:%lx PageCont:%d PageHead:%d PageAnon:%d PageSwapBacked:%d PageContRefill:%d "
-				"flags:%lx lru.next:%lx lru.prev:%lx compound_head:%lx pfn:%lx head_pfn:%lx within_cont_pte_cma:%d @\n",
-				__func__, __LINE__, current->comm, current->pid,
-				(unsigned long)page, PageCont(page), PageHead(page), PageAnon(page),
-				PageSwapBacked(page), PageContRefill(page), page->flags, (unsigned long)page->lru.next,
-				(unsigned long)page->lru.prev, (unsigned long)compound_head(page),
-				page_to_pfn(page), page_to_pfn(compound_head(page)), within_cont_pte_cma(page_to_pfn(page)));
-		dump_page(page, "FIXME: the tail page of a cont-pte hugepage is added to an lru!\n");
-		BUG_ON(1);
-	}
-#endif
 
 	if (!pagevec_add(pvec, page) || PageCompound(page) ||
 			lru_cache_disabled())
@@ -356,15 +325,8 @@ void lru_note_cost(struct lruvec *lruvec, bool file, unsigned int nr_pages)
 
 void lru_note_cost_page(struct page *page)
 {
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	/* NOTE: The cont_pte_nr_pages is used to support
-	 * cont-pte hugepages with intermediate states! */
 	lru_note_cost(mem_cgroup_page_lruvec(page, page_pgdat(page)),
-		      page_is_file_lru(page), cont_pte_nr_pages(page));
-#else
-	lru_note_cost(mem_cgroup_page_lruvec(page, page_pgdat(page)),
-			page_is_file_lru(page), thp_nr_pages(page));
-#endif
+		      page_is_file_lru(page), thp_nr_pages(page));
 }
 
 static void __activate_page(struct page *page, struct lruvec *lruvec,
@@ -426,12 +388,7 @@ static void activate_page(struct page *page)
 
 	page = compound_head(page);
 	spin_lock_irq(&pgdat->lru_lock);
-#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
-	if (ContPteCMAHugePageHead(page))
-		__activate_page(page, mem_cgroup_chp_page_lruvec(page, pgdat), NULL);
-	else
-#endif
-		__activate_page(page, mem_cgroup_page_lruvec(page, pgdat), NULL);
+	__activate_page(page, mem_cgroup_page_lruvec(page, pgdat), NULL);
 	spin_unlock_irq(&pgdat->lru_lock);
 }
 #endif
@@ -1108,12 +1065,7 @@ void release_pages(struct page **pages, int nr)
 				spin_lock_irqsave(&locked_pgdat->lru_lock, flags);
 			}
 
-#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
-			if (ContPteCMAHugePageHead(page))
-				lruvec = mem_cgroup_chp_page_lruvec(page, locked_pgdat);
-			else
-#endif
-				lruvec = mem_cgroup_page_lruvec(page, locked_pgdat);
+			lruvec = mem_cgroup_page_lruvec(page, locked_pgdat);
 			VM_BUG_ON_PAGE(!PageLRU(page), page);
 			__ClearPageLRU(page);
 			del_page_from_lru_list(page, lruvec, page_off_lru(page));
@@ -1161,10 +1113,6 @@ void lru_add_page_tail(struct page *page, struct page *page_tail,
 	VM_BUG_ON_PAGE(PageCompound(page_tail), page);
 	VM_BUG_ON_PAGE(PageLRU(page_tail), page);
 	lockdep_assert_held(&lruvec_pgdat(lruvec)->lru_lock);
-
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	BUG_ON(1);
-#endif
 
 	if (!list)
 		SetPageLRU(page_tail);

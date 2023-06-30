@@ -301,12 +301,6 @@ int free_swap_slot(swp_entry_t entry)
 	trace_android_vh_free_swap_slot(entry, cache, &skip);
 	if (skip)
 		return 0;
-
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	/* othereise, basepages can get hugepages' zRAM */
-	if (is_thp_swap(swp_swap_info(entry)))
-		goto direct_free;
-#endif
 	if (likely(use_swap_slot_cache && cache->slots_ret)) {
 		spin_lock_irq(&cache->free_lock);
 		/* Swap slots cache may be deactivated before acquiring lock */
@@ -347,11 +341,7 @@ swp_entry_t get_swap_page(struct page *page)
 
 	if (PageTransHuge(page)) {
 		if (IS_ENABLED(CONFIG_THP_SWAP))
-			get_swap_pages(1, &entry, thp_nr_pages(page));
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		/* TODO remove in the future */
-		BUG_ON(entry.val && !is_thp_swap(swp_swap_info(entry)));
-#endif
+			get_swap_pages(1, &entry, HPAGE_PMD_NR);
 		goto out;
 	}
 

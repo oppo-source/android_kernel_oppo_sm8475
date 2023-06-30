@@ -61,9 +61,6 @@
 #include "qcom_dynamic_page_pool.h"
 #include "qcom_sg_ops.h"
 #include "qcom_system_heap.h"
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-#include "chp_ext.h"
-#endif
 
 #ifdef CONFIG_OPLUS_FEATURE_MM_BOOSTPOOL
 #include "oplus_boostpool/oplus_boost_pool.h"
@@ -209,13 +206,6 @@ static void system_heap_buf_free(struct deferred_freelist_item *item,
 	for_each_sg(table->sgl, sg, table->nents, i) {
 		struct page *page = sg_page(sg);
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		/*refill hugepage, if the page is alloc from hugepage pool*/
-		if(unlikely(is_chp_ext_pages(page, compound_order(page)))){
-			put_page(page);
-			continue;
-		}
-#endif
 		if (reason == DF_UNDER_PRESSURE) {
 			__free_pages(page, compound_order(page));
 		} else {
@@ -268,12 +258,6 @@ struct page *qcom_sys_heap_alloc_largest_available(struct dynamic_page_pool **po
 			page = dynamic_page_pool_remove(pools[i], false);
 		spin_unlock_irqrestore(&pools[i]->lock, flags);
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		/*try get page from hugepage pool when order is HPAGE_CONT_PTE_ORDER*/
-		if (!page && (orders[i] == HPAGE_CONT_PTE_ORDER)){
-			page = alloc_chp_ext_wrapper(pools[i]->gfp_mask, CHP_EXT_DMABUF);
-		}
-#endif
 		if (!page)
 			page = alloc_pages(pools[i]->gfp_mask, pools[i]->order);
 		if (!page)
@@ -394,13 +378,8 @@ vmperm_release:
 free_sg:
 	sg_free_table(table);
 free_buffer:
-	list_for_each_entry_safe(page, tmp_page, &pages, lru){
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-		__free_pages_ext(page, compound_order(page));
-#else
+	list_for_each_entry_safe(page, tmp_page, &pages, lru)
 		__free_pages(page, compound_order(page));
-#endif
-	}
 	kfree(buffer);
 
 	return ERR_PTR(ret);

@@ -597,44 +597,8 @@ static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 	if (!page)
 		return;
 
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	/* NOTE: pte_cont filters out double map pages */
-	if (ContPteHugePage(page) && pte_cont(*pte)) {
-		if (PageHead(page)) {
-			int i;
-			pte_t *ptep = pte;
-			bool young = false;
-			bool dirty = false;
-
-			if (PageAnon(page))
-				mss->anonymous_thp += HPAGE_CONT_PTE_SIZE;
-			else if (PageSwapBacked(page))
-				mss->shmem_thp += HPAGE_CONT_PTE_SIZE;
-			else if (is_zone_device_page(page))
-				/* pass */;
-			else if (!is_huge_zero_page(page))
-				mss->file_thp += HPAGE_CONT_PTE_SIZE;
-
-			for (i = 0; i < HPAGE_CONT_PTE_NR; i++) {
-				if (!young && pte_young(*ptep))
-					young = true;
-
-				if (!dirty &&  pte_dirty(*ptep))
-					dirty = true;
-
-				if (dirty && young)
-					break;
-
-				ptep++;
-			}
-			smaps_account(mss, page, true, young, dirty, locked, migration);
-		}
-	} else
-#endif
-	{
-		smaps_account(mss, page, false, pte_young(*pte), pte_dirty(*pte),
-				locked, migration);
-	}
+	smaps_account(mss, page, false, pte_young(*pte), pte_dirty(*pte),
+		      locked, migration);
 }
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -947,81 +911,6 @@ static int show_smap(struct seq_file *m, void *v)
 
 	seq_printf(m, "THPeligible:    %d\n",
 		   transparent_hugepage_active(vma));
-
-#if defined(CONFIG_CONT_PTE_HUGEPAGE) && defined(CONFIG_CONT_PTE_HUGEPAGE_DEBUG)
-	if (!strcmp(current->comm, "cat")) {
-		char buf[256];
-		char *p;
-
-		if (!vma_is_anonymous(vma)) {
-			if (mss.file_thp) {
-				p = d_path(&vma->vm_file->f_path, buf, 256);
-				if (!IS_ERR(p)) {
-					seq_printf(m, "GottenContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
-							vma->vm_start, vma->vm_end,
-							vma->vm_flags & VM_READ ? 'r' : '-',
-							vma->vm_flags & VM_WRITE ? 'w' : '-',
-							vma->vm_flags & VM_EXEC ? 'x' : '-',
-							vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
-							vma->vm_pgoff);
-					SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
-					SEQ_PUT_DEC("kB  rss:", mss.resident);
-					SEQ_PUT_DEC("kB  thp_size:", mss.file_thp);
-					seq_printf(m, "kB  %s\n", p);
-				}
-			} else {
-				if (transhuge_cont_pte_vma_suitable(vma, ALIGN_DOWN(vma->vm_start, HPAGE_CONT_PTE_SIZE) + HPAGE_CONT_PTE_SIZE)) {
-					p = d_path(&vma->vm_file->f_path, buf, 256);
-					if (!IS_ERR(p)) {
-						/* filter: vma size >= 128k */
-						if ((vma->vm_end - vma->vm_start) >= (128 << 10)) {
-							seq_printf(m, "MissedContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
-									vma->vm_start, vma->vm_end,
-									vma->vm_flags & VM_READ ? 'r' : '-',
-									vma->vm_flags & VM_WRITE ? 'w' : '-',
-									vma->vm_flags & VM_EXEC ? 'x' : '-',
-									vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
-									vma->vm_pgoff);
-							SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
-							SEQ_PUT_DEC("kB  rss:", mss.resident);
-							SEQ_PUT_DEC("kB  thp_size:", mss.file_thp);
-							seq_printf(m, "kB  %s\n", p);
-						}
-					}
-				}
-			}
-		} else {
-			seq_printf(m, "Flag: %lx\n", vma->vm_flags);
-			if (mss.anonymous_thp) {
-				seq_printf(m, "GottenAnonContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
-						vma->vm_start, vma->vm_end,
-						vma->vm_flags & VM_READ ? 'r' : '-',
-						vma->vm_flags & VM_WRITE ? 'w' : '-',
-						vma->vm_flags & VM_EXEC ? 'x' : '-',
-						vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
-						vma->vm_pgoff);
-				SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
-				SEQ_PUT_DEC("kB  rss:", mss.resident);
-				SEQ_PUT_DEC("kB  thp_size:", mss.anonymous_thp);
-				seq_printf(m, "kB \n");
-			} else {
-				if (mss.resident >= HPAGE_CONT_PTE_SIZE) {
-					seq_printf(m, "MissedAnonContPte: %lx-%lx(vma) %c%c%c%c %lx(pgoff) ",
-							vma->vm_start, vma->vm_end,
-							vma->vm_flags & VM_READ ? 'r' : '-',
-							vma->vm_flags & VM_WRITE ? 'w' : '-',
-							vma->vm_flags & VM_EXEC ? 'x' : '-',
-							vma->vm_flags & VM_MAYSHARE ? 's' : 'p',
-							vma->vm_pgoff);
-					SEQ_PUT_DEC("size:", vma->vm_end - vma->vm_start);
-					SEQ_PUT_DEC("kB  rss:", mss.resident);
-					SEQ_PUT_DEC("kB  thp_size:", mss.anonymous_thp);
-					seq_printf(m, "kB \n");
-				}
-			}
-		}
-	}
-#endif
 
 	if (arch_pkeys_enabled())
 		seq_printf(m, "ProtectionKey:  %8u\n", vma_pkey(vma));

@@ -115,12 +115,7 @@ static bool __munlock_isolate_lru_page(struct page *page, bool getpage)
 	if (PageLRU(page)) {
 		struct lruvec *lruvec;
 
-#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
-		if (ContPteCMAHugePageHead(page))
-			lruvec = mem_cgroup_chp_page_lruvec(page, page_pgdat(page));
-		else
-#endif
-			lruvec = mem_cgroup_page_lruvec(page, page_pgdat(page));
+		lruvec = mem_cgroup_page_lruvec(page, page_pgdat(page));
 		if (getpage)
 			get_page(page);
 		ClearPageLRU(page);

@@ -203,10 +203,6 @@ int inode_init_always(struct super_block *sb, struct inode *inode)
 #endif
 	inode->i_flctx = NULL;
 	this_cpu_inc(nr_inodes);
-#ifdef CONFIG_CONT_PTE_HUGEPAGE
-	/* for cont-pte file hugepage */
-	inode->may_cont_pte = 0;
-#endif
 
 	return 0;
 out:
@@ -534,18 +530,7 @@ void clear_inode(struct inode *inode)
 	 */
 	xa_lock_irq(&inode->i_data.i_pages);
 	BUG_ON(inode->i_data.nrpages);
-#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	BUG_ON(inode->i_data.nrexceptional);
-#else
-	/*
-	 * Almost always, mapping_empty(&inode->i_data) here; but there are
-	 * two known and long-standing ways in which nodes may get left behind
-	 * (when deep radix-tree node allocation failed partway; or when THP
-	 * collapse_file() failed). Until those two known cases are cleaned up,
-	 * or a cleanup function is called here, do not BUG_ON(!mapping_empty),
-	 * nor even WARN_ON(!mapping_empty).
-	 */
-#endif
 	xa_unlock_irq(&inode->i_data.i_pages);
 	BUG_ON(!list_empty(&inode->i_data.private_list));
 	BUG_ON(!(inode->i_state & I_FREEING));
