@@ -33,6 +33,24 @@
 /* MAX_MARGIN_LEVELS should be one less than MAX_CLUSTERS */
 #define MAX_MARGIN_LEVELS (MAX_CLUSTERS - 1)
 
+enum EM_CLUSTER_TYPE {
+	EM_CLUSTER_MIN = 0,
+	EM_CLUSTER_MID,
+	EM_CLUSTER_MAX,
+	EM_CLUSTER_NUM,
+};
+
+struct em_map_util_freq {
+	int gov_id;
+	void (*pgov_map_func)(void *data, unsigned long util, unsigned long freq,
+		unsigned long cap, unsigned long *max_util, struct cpufreq_policy *policy,
+		bool *need_freq_update);
+};
+
+struct cluster_em_map_util_freq {
+	struct em_map_util_freq cem_map_util_freq[EM_CLUSTER_NUM];
+};
+
 extern bool walt_disabled;
 
 enum task_event {
@@ -144,6 +162,12 @@ extern struct walt_sched_cluster *sched_cluster[WALT_NR_CPUS];
 
 /*END SCHED.H PORT*/
 
+extern void default_em_map_util_freq(void *data, unsigned long util, unsigned long freq,
+	unsigned long cap, unsigned long *max_util, struct cpufreq_policy *policy,
+	bool *need_freq_update);
+
+extern struct cluster_em_map_util_freq g_em_map_util_freq;
+extern u64 walt_ktime_get_ns(void);
 extern int num_sched_clusters;
 extern unsigned int sched_capacity_margin_up[WALT_NR_CPUS];
 extern unsigned int sched_capacity_margin_down[WALT_NR_CPUS];
@@ -216,6 +240,11 @@ extern __read_mostly unsigned int sysctl_sched_force_lb_enable;
 extern const int sched_user_hint_max;
 extern unsigned int sysctl_sched_dynamic_tp_enable;
 extern unsigned int sysctl_panic_on_walt_bug;
+
+#ifdef CONFIG_OPLUS_FEATURE_SUGOV_TL
+extern unsigned int get_targetload(struct cpufreq_policy *policy);
+#endif /* CONFIG_OPLUS_FEATURE_SUGOV_TL */
+
 extern int sched_dynamic_tp_handler(struct ctl_table *table, int write,
 			void __user *buffer, size_t *lenp, loff_t *ppos);
 
@@ -247,7 +276,7 @@ static inline unsigned int sched_cpu_legacy_freq(int cpu)
 extern __read_mostly bool sched_freq_aggr_en;
 static inline void walt_enable_frequency_aggregation(bool enable)
 {
-	sched_freq_aggr_en = enable;
+/* disable frequency_aggregation since we have already enable frameboost */
 }
 
 #ifndef CONFIG_IRQ_TIME_ACCOUNTING
@@ -295,6 +324,9 @@ extern unsigned int sched_lib_mask_force;
 #define WALT_CPUFREQ_PL			(1U << 3)
 #define WALT_CPUFREQ_EARLY_DET		(1U << 4)
 #define WALT_CPUFREQ_BOOST_UPDATE	(1U << 5)
+#if IS_ENABLED(CONFIG_OPLUS_CPUFREQ_IOWAIT_PROTECT)
+#define WALT_CPUFREQ_IOWAIT		(1U << 10)
+#endif
 
 #define NO_BOOST 0
 #define FULL_THROTTLE_BOOST 1
@@ -909,6 +941,65 @@ struct compute_energy_output {
 	unsigned long	cost[MAX_CLUSTERS];
 	unsigned int	cluster_first_cpu[MAX_CLUSTERS];
 };
+
+struct cluster_freq_relation {
+	int src_freq_scale;
+	int dst_cpu;
+	int tgt_freq_scale;
+};
+
+extern struct cluster_freq_relation cluster_arr[3][5];
+extern int sched_ignore_cluster_handler(struct ctl_table *table, int write,
+			void __user *buffer, size_t *lenp, loff_t *ppos);
+//Check to confirm if we can ignore cluster for p
+static inline bool ignore_cluster_valid(struct task_struct *p, struct rq *rq)
+{
+	cpumask_t tmp;
+	int i;
+	struct walt_rq *wrq = (struct walt_rq *)rq->android_vendor_data1;
+	int cluster = wrq->cluster->id;
+	int src_cpu = cpumask_first(&wrq->cluster->cpus);
+	int src_freq_scale = arch_scale_freq_capacity(src_cpu);
+	int tgt_scale, tgt_cpu;
+
+
+	/* if src cluster has no relationship */
+	if (cluster_arr[cluster][0].src_freq_scale <= 0)
+		return false;
+
+	/* if src cluster is below its threshold frequency */
+	if (src_freq_scale < cluster_arr[cluster][0].src_freq_scale)
+		return false;
+
+	/* if p is only affine to src cluster */
+	if (p) {
+		cpumask_andnot(&tmp, cpu_active_mask, &wrq->cluster->cpus);
+		if (!cpumask_intersects(&tmp, &p->cpus_mask))
+			return false;
+	}
+
+	for (i = 0; i < 5; i++)
+		if (cluster_arr[cluster][i].src_freq_scale > src_freq_scale)
+			break;
+	tgt_cpu = cpumask_first(&sched_cluster[cluster_arr[cluster][i - 1].dst_cpu]->cpus);
+	tgt_scale = cluster_arr[cluster][i - 1].tgt_freq_scale;
+
+	/*
+	 * In case target cluster is frequency limited to a frequency below target
+	 * scale then skip ignoring src cluster.
+	 */
+	if (capacity_orig_of(tgt_cpu) < tgt_scale)
+		return false;
+
+	/* Target cluster is above target scale */
+	if (arch_scale_freq_capacity(tgt_cpu) >= tgt_scale)
+		return false;
+
+	/* We reach here, means we need to ignore src cluster for placement */
+	return true;
+}
+
+
 
 extern void walt_task_dump(struct task_struct *p);
 extern void walt_rq_dump(int cpu);
