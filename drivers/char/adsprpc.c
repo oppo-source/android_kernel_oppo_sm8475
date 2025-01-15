@@ -615,6 +615,9 @@ struct fastrpc_mmap {
 	struct timespec64 map_end_time;
 	/* Mapping for fastrpc shell */
 	bool is_filemap;
+	unsigned int ctx_refs; /* Indicates reference count for context map */
+	/* Map in use for dma handle */
+	unsigned int dma_handle_refs;
 };
 
 enum fastrpc_perfkeys {
@@ -1289,6 +1292,10 @@ static int fastrpc_mmap_remove(struct fastrpc_file *fl, int fd, uintptr_t va,
 		if ((fd < 0 || map->fd == fd) && map->raddr == va &&
 			map->raddr + map->len == va + len &&
 			map->refs == 1 &&
+			/* Remove if only one reference map and no context map */
+			!map->ctx_refs &&
+			/* Remove map only if it isn't being used by DSP */
+			!map->dma_handle_refs &&
 			/* Skip unmap if it is fastrpc shell memory */
 			!map->is_filemap) {
 			match = map;
@@ -1344,8 +1351,9 @@ static void fastrpc_mmap_free(struct fastrpc_mmap *map, uint32_t flags)
 	if (map->flags == ADSP_MMAP_HEAP_ADDR ||
 				map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
 		spin_lock_irqsave(&me->hlock, irq_flags);
-		map->refs--;
-		if (!map->refs)
+		if (map->refs)
+			map->refs--;
+		if (!map->refs && !map->ctx_refs)
 			hlist_del_init(&map->hn);
 		spin_unlock_irqrestore(&me->hlock, irq_flags);
 		if (map->refs > 0) {
@@ -1355,8 +1363,12 @@ static void fastrpc_mmap_free(struct fastrpc_mmap *map, uint32_t flags)
 			return;
 		}
 	} else {
-		map->refs--;
-		if (!map->refs)
+		if (map->refs)
+			map->refs--;
+		/* flags is passed as 1 during fastrpc_file_free (ie process exit),
+		 * so that maps will be cleared even though references are present.
+		 */
+		if (!map->refs && !map->ctx_refs && !map->dma_handle_refs)
 			hlist_del_init(&map->hn);
 		if (map->refs > 0 && !flags)
 			return;
@@ -1495,6 +1507,7 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd, struct dma_buf *
 	map->buf = buf;
 	map->frpc_md_index = -1;
 	map->is_filemap = false;
+	map->ctx_refs = 0;
 	ktime_get_real_ts64(&map->map_start_time);
 	if (mflags == ADSP_MMAP_HEAP_ADDR ||
 				mflags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
@@ -2239,8 +2252,11 @@ static void context_free(struct smq_invoke_ctx *ctx)
 	spin_unlock(&ctx->fl->hlock);
 
 	mutex_lock(&ctx->fl->map_mutex);
-	for (i = 0; i < nbufs; ++i)
+	for (i = 0; i < nbufs; ++i) {
+		if (ctx->maps[i] && ctx->maps[i]->ctx_refs)
+			ctx->maps[i]->ctx_refs--;
 		fastrpc_mmap_free(ctx->maps[i], 0);
+	}
 	mutex_unlock(&ctx->fl->map_mutex);
 
 	fastrpc_buf_free(ctx->buf, 1);
@@ -2616,6 +2632,8 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 			err = fastrpc_mmap_create(ctx->fl, ctx->fds[i], NULL,
 					ctx->attrs[i], buf, len,
 					mflags, &ctx->maps[i]);
+		if (ctx->maps[i])
+			ctx->maps[i]->ctx_refs++;
 		mutex_unlock(&ctx->fl->map_mutex);
 		if (err)
 			goto bail;
@@ -2642,9 +2660,15 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 			err = fastrpc_mmap_create(ctx->fl, ctx->fds[i], NULL,
 					FASTRPC_ATTR_NOVA, 0, 0, dmaflags,
 					&ctx->maps[i]);
+		if (!err && ctx->maps[i])
+			ctx->maps[i]->dma_handle_refs++;
 		if (err) {
-			for (j = bufs; j < i; j++)
-				fastrpc_mmap_free(ctx->maps[j], 0);
+			for (j = bufs; j < i; j++) {
+				if (ctx->maps[j] && ctx->maps[j]->dma_handle_refs) {
+					ctx->maps[j]->dma_handle_refs--;
+					fastrpc_mmap_free(ctx->maps[j], 0);
+				}
+			}
 			mutex_unlock(&ctx->fl->map_mutex);
 			goto bail;
 		}
@@ -2781,13 +2805,32 @@ static int get_args(uint32_t kernel, struct smq_invoke_ctx *ctx)
 		rpra[i].buf.pv = buf;
 	}
 	PERF_END);
+	/* Since we are not holidng map_mutex during get args whole time
+	 * it is possible that dma handle map may be removed by some invalid
+	 * fd passed by DSP. Inside the lock check if the map present or not
+	 */
+	mutex_lock(&ctx->fl->map_mutex);
 	for (i = bufs; i < bufs + handles; ++i) {
-		struct fastrpc_mmap *map = ctx->maps[i];
-		if (map) {
-			pages[i].addr = map->phys;
-			pages[i].size = map->size;
+		struct fastrpc_mmap *mmap = NULL;
+		/* check if map  was created */
+		if (ctx->maps[i]) {
+			/* check if map still exist */
+			if (!fastrpc_mmap_find(ctx->fl, ctx->fds[i], NULL, 0, 0,
+				0, 0, &mmap)) {
+				if (mmap) {
+					pages[i].addr = mmap->phys;
+					pages[i].size = mmap->size;
+				}
+			} else {
+				/* map already freed by some other call */
+				mutex_unlock(&ctx->fl->map_mutex);
+				ADSPRPC_ERR("could not find map associated with dma handle fd %d\n",
+					ctx->fds[i]);
+				goto bail;
+			}
 		}
 	}
+	mutex_unlock(&ctx->fl->map_mutex);
 	fdlist = (uint64_t *)&pages[bufs + handles];
 	crclist = (uint32_t *)&fdlist[M_FDLIST];
 	/* reset fds, crc and early wakeup hint memory */
@@ -2973,6 +3016,8 @@ static int put_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 			}
 		} else {
 			mutex_lock(&ctx->fl->map_mutex);
+			if (ctx->maps[i]->ctx_refs)
+				ctx->maps[i]->ctx_refs--;
 			fastrpc_mmap_free(ctx->maps[i], 0);
 			mutex_unlock(&ctx->fl->map_mutex);
 			ctx->maps[i] = NULL;
@@ -2983,8 +3028,12 @@ static int put_args(uint32_t kernel, struct smq_invoke_ctx *ctx,
 		if (!fdlist[i])
 			break;
 		if (!fastrpc_mmap_find(ctx->fl, (int)fdlist[i], NULL, 0, 0,
-					0, 0, &mmap))
-			fastrpc_mmap_free(mmap, 0);
+					0, 0, &mmap)){
+			if (mmap && mmap->dma_handle_refs) {
+				mmap->dma_handle_refs = 0;
+				fastrpc_mmap_free(mmap, 0);
+			}
+		}
 	}
 	mutex_unlock(&ctx->fl->map_mutex);
 	if (ctx->crc && crclist && rpra)
@@ -4245,6 +4294,8 @@ static int fastrpc_init_create_static_process(struct fastrpc_file *fl,
 		mutex_lock(&fl->map_mutex);
 		err = fastrpc_mmap_create(fl, -1, NULL, 0, init->mem,
 			 init->memlen, ADSP_MMAP_REMOTE_HEAP_ADDR, &mem);
+			 if (mem)
+			 	mem->is_filemap = true;
 		mutex_unlock(&fl->map_mutex);
 		if (err)
 			goto bail;
@@ -5185,7 +5236,8 @@ static int fastrpc_internal_mem_map(struct fastrpc_file *fl,
 	int err = 0;
 	struct fastrpc_mmap *map = NULL;
 
-	VERIFY(err, fl->dsp_proc_init == 1);
+	mutex_lock(&fl->internal_map_mutex);
+        VERIFY(err, fl->dsp_proc_init == 1);
 	if (err) {
 		pr_err("adsprpc: ERROR: %s: user application %s trying to map without initialization\n",
 			__func__, current->comm);
@@ -5223,6 +5275,7 @@ bail:
 			mutex_unlock(&fl->map_mutex);
 		}
 	}
+        mutex_unlock(&fl->internal_map_mutex);
 	return err;
 }
 
@@ -5233,6 +5286,7 @@ static int fastrpc_internal_mem_unmap(struct fastrpc_file *fl,
 	struct fastrpc_mmap *map = NULL;
 	size_t map_size = 0;
 
+        mutex_lock(&fl->internal_map_mutex);
 	VERIFY(err, fl->dsp_proc_init == 1);
 	if (err) {
 		pr_err("adsprpc: ERROR: %s: user application %s trying to map without initialization\n",
@@ -5279,6 +5333,7 @@ bail:
 			mutex_unlock(&fl->map_mutex);
 		}
 	}
+        mutex_unlock(&fl->internal_map_mutex);
 	return err;
 }
 
