@@ -21,6 +21,7 @@
 #include <linux/blk-crypto.h>
 
 #include <trace/events/block.h>
+#include <trace/hooks/block.h>
 #include "blk.h"
 #include "blk-rq-qos.h"
 
@@ -252,6 +253,7 @@ static void bio_free(struct bio *bio)
 	struct bio_set *bs = bio->bi_pool;
 	void *p;
 
+	trace_android_vh_bio_free(bio);
 	bio_uninit(bio);
 
 	if (bs) {
@@ -1056,9 +1058,6 @@ static int __bio_iov_append_get_pages(struct bio *bio, struct iov_iter *iter)
 	unsigned len, i;
 	size_t offset;
 	int ret = 0;
-
-	if (WARN_ON_ONCE(!max_append_sectors))
-		return 0;
 
 	/*
 	 * Move page array up in the allocated memory for the bio vecs as far as

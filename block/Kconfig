@@ -242,4 +242,8 @@ config BLK_MQ_RDMA
 config BLK_PM
 	def_bool BLOCK && PM
 
+config BLOCKIO_UX_OPT
+	bool
+	default y
+
 source "block/Kconfig.iosched"
