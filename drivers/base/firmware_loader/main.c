@@ -91,6 +91,7 @@ static inline struct fw_priv *to_fw_priv(struct kref *ref)
 DEFINE_MUTEX(fw_lock);
 
 static struct firmware_cache fw_cache;
+bool fw_load_abort_all;
 
 /* Builtin firmware support */
 
@@ -880,6 +881,25 @@ request_firmware(const struct firmware **firmware_p, const char *name,
 }
 EXPORT_SYMBOL(request_firmware);
 
+#ifdef OPLUS_FEATURE_WIFI_BDF
+//Add for: reload wlan bdf without using cache
+int
+request_firmware_no_cache(const struct firmware **firmware_p, const char *name,
+                 struct device *device)
+{
+        int ret;
+
+        /* Need to pin this module until return */
+        __module_get(THIS_MODULE);
+        ret = _request_firmware(firmware_p, name, device, NULL, 0, 0,
+                                FW_OPT_UEVENT | FW_OPT_NOCACHE);
+        module_put(THIS_MODULE);
+        return ret;
+}
+EXPORT_SYMBOL(request_firmware_no_cache);
+#endif /* OPLUS_FEATURE_WIFI_BDF */
+
+
 /**
  * firmware_request_nowarn() - request for an optional fw module
  * @firmware: pointer to firmware image
@@ -1442,10 +1462,10 @@ static int fw_pm_notify(struct notifier_block *notify_block,
 	case PM_SUSPEND_PREPARE:
 	case PM_RESTORE_PREPARE:
 		/*
-		 * kill pending fallback requests with a custom fallback
-		 * to avoid stalling suspend.
+		 * Here, kill pending fallback requests will only kill
+		 * non-uevent firmware request to avoid stalling suspend.
 		 */
-		kill_pending_fw_fallback_reqs(true);
+		kill_pending_fw_fallback_reqs(false);
 		device_cache_fw_images();
 		break;
 
@@ -1530,7 +1550,7 @@ static int fw_shutdown_notify(struct notifier_block *unused1,
 	 * Kill all pending fallback requests to avoid both stalling shutdown,
 	 * and avoid a deadlock with the usermode_lock.
 	 */
-	kill_pending_fw_fallback_reqs(false);
+	kill_pending_fw_fallback_reqs(true);
 
 	return NOTIFY_DONE;
 }
