@@ -87,6 +87,10 @@
 #define USB3_HCSPARAMS1		(0x4)
 #define USB3_PORTSC		(0x420)
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+#define USB3_PORTPMSC_20	(0x424)
+#endif
+
 /**
  *  USB QSCRATCH Hardware registers
  *
@@ -106,6 +110,11 @@
 #define PWR_EVNT_LPM_OUT_L1_MASK		BIT(13)
 
 #define EXTRA_INP_SS_DISABLE	BIT(5)
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+#define USB3_PRI_LINK_REGS_LLUCTL(n)	(0xd024 + ((n) * 0x80))
+#define FORCE_GEN1_MASK			BIT(10)
+#endif
 
 /* QSCRATCH_GENERAL_CFG register bit offset */
 #define PIPE_UTMI_CLK_SEL	BIT(0)
@@ -589,6 +598,35 @@ struct dwc3_msm {
 void *dwc_trace_ipc_log_ctxt;
 
 static void dwc3_pwr_event_handler(struct dwc3_msm *mdwc);
+#ifdef OPLUS_FEATURE_CHG_BASIC
+
+static bool (*oplus_ignore_usb_notify)(void);
+void oplus_dwc3_config_usbphy_pfunc(bool (*pfunc)(void))
+{
+	oplus_ignore_usb_notify = pfunc;
+}
+EXPORT_SYMBOL(oplus_dwc3_config_usbphy_pfunc);
+
+void oplus_usb_set_none_role(void)
+{
+	printk(KERN_ERR "%s\n", __func__);
+}
+EXPORT_SYMBOL(oplus_usb_set_none_role);
+
+static bool oplus_dwc3_need_set_usbphy_hz(void)
+{
+	bool ret = false;
+
+	if (oplus_ignore_usb_notify == NULL) {
+		ret = false;
+	} else {
+		ret = oplus_ignore_usb_notify();
+	}
+
+	printk(KERN_ERR "%s, set usbphy hz:%d\n", __func__, ret);
+	return ret;
+}
+#endif
 static int get_chg_type(struct dwc3_msm *mdwc);
 
 static inline void dwc3_msm_ep_writel(void __iomem *base, u32 offset, u32 value)
@@ -4521,6 +4559,15 @@ static int dwc3_msm_set_role(struct dwc3_msm *mdwc, enum usb_role role)
 		return -EINVAL;
 
 	mutex_lock(&mdwc->role_switch_mutex);
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if (oplus_dwc3_need_set_usbphy_hz() == true && role != USB_ROLE_NONE) {
+		pr_err("!!!ignore the notify to start USB device mode");
+		mutex_unlock(&mdwc->role_switch_mutex);
+		return 0;
+	}
+#endif
+
 	cur_role = dwc3_msm_get_role(mdwc);
 
 	dbg_log_string("cur_role:%s new_role:%s refcnt:%d\n", usb_role_string(cur_role),
@@ -4758,11 +4805,46 @@ static ssize_t bus_vote_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(bus_vote);
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+static ssize_t xhci_test_store(struct device *dev,
+	struct device_attribute *attr, const char *buf,
+	size_t count)
+{
+	struct dwc3_msm *mdwc = dev_get_drvdata(dev);
+	struct dwc3 *dwc;
+	enum usb_role cur_role;
+	u32 reg;
+
+	if (mdwc->dwc3 == NULL)
+		return count;
+
+	dwc = platform_get_drvdata(mdwc->dwc3);
+	cur_role = dwc3_msm_get_role(mdwc);
+	if (cur_role != USB_ROLE_HOST) {
+		dev_err(dev, "USB is not in host mode\n");
+		return count;
+	}
+
+	pm_runtime_resume(&dwc->xhci->dev);
+	pm_runtime_forbid(&dwc->xhci->dev);
+	reg = dwc3_msm_read_reg(mdwc->base, USB3_PORTPMSC_20);
+	dev_info(dev, "USB PORTPMSC val:%x\n", reg);
+	reg |= USB_TEST_PACKET << PORT_TEST_MODE_SHIFT;
+	dev_info(dev, "writing %x to USB PORTPMSC\n", reg);
+	dwc3_msm_write_reg(mdwc->base, USB3_PORTPMSC_20, reg);
+	return count;
+}
+static DEVICE_ATTR_WO(xhci_test);
+#endif
+
 static struct attribute *dwc3_msm_attrs[] = {
 	&dev_attr_orientation.attr,
 	&dev_attr_mode.attr,
 	&dev_attr_speed.attr,
 	&dev_attr_bus_vote.attr,
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	&dev_attr_xhci_test.attr,
+#endif
 	NULL
 };
 ATTRIBUTE_GROUPS(dwc3_msm);
@@ -5829,6 +5911,9 @@ static void msm_dwc3_perf_vote_work(struct work_struct *w)
 static int dwc3_otg_start_host(struct dwc3_msm *mdwc, int on)
 {
 	struct dwc3 *dwc = platform_get_drvdata(mdwc->dwc3);
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	u32 val;
+#endif
 
 	if (on) {
 		dev_dbg(mdwc->dev, "%s: turn on host\n", __func__);
@@ -5892,6 +5977,15 @@ static int dwc3_otg_start_host(struct dwc3_msm *mdwc, int on)
 
 		dwc3_msm_write_reg_field(mdwc->base, DWC3_GUSB3PIPECTL(0),
 				DWC3_GUSB3PIPECTL_SUSPHY, 1);
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+		/* disable host gen2 */
+		if (mdwc->ss_phy->flags & PHY_HOST_MODE){
+			dwc3_msm_write_reg_field(mdwc->base, USB3_PRI_LINK_REGS_LLUCTL(0), FORCE_GEN1_MASK, 1);
+			val = dwc3_msm_read_reg_field(mdwc->base, USB3_PRI_LINK_REGS_LLUCTL(0), FORCE_GEN1_MASK);
+			dev_info(mdwc->dev, "Turn on host: FORCE_GEN1_MASK = %d", val);
+		}
+#endif
 
 		/* Reduce the U3 exit handshake timer from 8us to approximately
 		 * 300ns to avoid lfps handshake interoperability issues
@@ -6098,7 +6192,11 @@ static int dwc3_otg_start_peripheral(struct dwc3_msm *mdwc, int on)
 		 * disable), and retry suspend again.
 		 */
 		ret = pm_runtime_put_sync(&mdwc->dwc3->dev);
-		if (ret < 0) {
+//#ifdef OPLUS_FEATURE_CHG_BASIC
+		if (!pm_runtime_suspended(&mdwc->dwc3->dev)) {
+//#else
+//		if (ret < 0) {
+//#endif
 			while (--timeout && dwc->connected)
 				msleep(20);
 			dbg_event(0xFF, "StopGdgt connected", dwc->connected);
