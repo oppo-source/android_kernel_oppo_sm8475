@@ -210,7 +210,7 @@ static int handle_async_copy(struct nfs42_copy_res *res,
 
 	if (dst_server != src_server) {
 		spin_lock(&src_server->nfs_client->cl_lock);
-		list_add_tail(&copy->src_copies, &src_server->ss_copies);
+		list_add_tail(&copy->src_copies, &src_server->ss_src_copies);
 		spin_unlock(&src_server->nfs_client->cl_lock);
 	}
 
@@ -443,8 +443,9 @@ ssize_t nfs42_proc_copy(struct file *src, loff_t pos_src,
 				continue;
 			}
 			break;
-		} else if (err == -NFS4ERR_OFFLOAD_NO_REQS && !args.sync) {
-			args.sync = true;
+		} else if (err == -NFS4ERR_OFFLOAD_NO_REQS &&
+				args.sync != res.synchronous) {
+			args.sync = res.synchronous;
 			dst_exception.retry = 1;
 			continue;
 		} else if ((err == -ESTALE ||

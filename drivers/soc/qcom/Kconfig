@@ -215,6 +215,7 @@ config QCOM_RIMPS
 config QCOM_LLCC
 	tristate "Qualcomm Technologies, Inc. LLCC driver"
 	depends on ARCH_QCOM || COMPILE_TEST
+	select REGMAP_MMIO
 	help
 	  Last Level Cache Controller(LLCC) driver for platforms such as,
 	  SDM845. This provides interfaces to clients that use the LLCC.
@@ -467,6 +468,7 @@ config QCOM_RUN_QUEUE_STATS
 
 config QCOM_RPMPD
 	tristate "Qualcomm RPM Power domain driver"
+	depends on PM
 	depends on QCOM_SMD_RPM
 	help
 	  QCOM RPM Power domain driver to support power-domains with
@@ -554,6 +556,12 @@ config QCOM_SOC_SLEEP_STATS
 	  various SoC level low power modes statistics and export to debugfs
 	  interface.
 
+config OPLUS_POWERINFO_RPMH
+	bool "powerinfo rpmh config"
+	default n
+	help
+	  Select this config to enable powerinfo rpmh
+
 config QCOM_ADSP_SLEEPMON
 	tristate "ADSP sleep monitor"
 	depends on QCOM_SMEM
@@ -631,6 +639,16 @@ config QCOM_MINIDUMP_PANIC_CPU_CONTEXT
 	help
 	  This enables cpu context collection in minidump table,
 	  on panic.
+
+config QCOM_MINIDUMP_PANIC_KTASK_STACK
+	bool "QCOM Minidump Panic dumps Kernel Task Stack"
+	depends on QCOM_MINIDUMP_PANIC_DUMP && DETECT_HUNG_TASK
+	default y
+	help
+	  This enables kernel task call stack dump in minidump
+	  table, on panic. Only the kernel tasks that in
+	  TASK_UNINTERRUPTIBLE (D) state will be dumped, also
+	  the time it stuck will be printed.
 
 config QCOM_MINIDUMP_PSTORE
 	bool "QCOM Minidump Pstore dumps Support"
@@ -716,8 +734,7 @@ config MSM_PERFORMANCE
           writing cpu#:freq values
 
 config QMP_DEBUGFS_CLIENT
-	bool "Debugfs Client to communicate with AOP using QMP protocol"
-	depends on DEBUG_FS
+	tristate "Debugfs Client to communicate with AOP using QMP protocol"
 	help
 	  This options enables a driver which allows clients to send messages
 	  to Alway On processor using QMP transport. Users can echo a message
@@ -1039,7 +1056,7 @@ config QCOM_WATCHDOG_BARK_TIME
 	depends on QCOM_WDT_CORE
 	int "Qualcomm Technologies, Inc. Watchdog bark time in ms"
 	default 11000
-	range 11000 11000
+	range 11000 20000
 	help
 	  The amount of time, in milliseconds, that should elapse after
 	  a watchdog timer reset before a bark interrupt is sent from the
