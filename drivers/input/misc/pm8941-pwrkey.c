@@ -76,6 +76,7 @@ struct pm8941_pwrkey {
 
 	u32 code;
 	u32 sw_debounce_time_us;
+	u32 user_debounce_time_us;
 	ktime_t last_release_time;
 	bool last_status;
 	bool log_kpd_event;
@@ -152,7 +153,7 @@ static irqreturn_t pm8941_pwrkey_irq(int irq, void *_data)
 		elapsed_us = ktime_us_delta(ktime_get(),
 					    pwrkey->last_release_time);
 		if (elapsed_us < pwrkey->sw_debounce_time_us) {
-			dev_dbg(pwrkey->dev, "ignoring key event received after %llu us, debounce time=%u us\n",
+			dev_err(pwrkey->dev, "ignoring key event received after %llu us, debounce time=%u us\n",
 				elapsed_us, pwrkey->sw_debounce_time_us);
 			return IRQ_HANDLED;
 		}
@@ -181,6 +182,9 @@ static irqreturn_t pm8941_pwrkey_irq(int irq, void *_data)
 		input_sync(pwrkey->input);
 	}
 	pwrkey->last_status = sts;
+
+	if (pwrkey->code == KEY_POWER)
+		pr_err("keycode = %d, key_st = %d\n", pwrkey->code, sts);
 
 	input_report_key(pwrkey->input, pwrkey->code, sts);
 	input_sync(pwrkey->input);
@@ -213,8 +217,13 @@ static int pm8941_pwrkey_sw_debounce_init(struct pm8941_pwrkey *pwrkey)
 		pwrkey->sw_debounce_time_us = 2 * USEC_PER_SEC /
 						(1 << (0x7 - (val & 0x7)));
 
-	dev_dbg(pwrkey->dev, "SW debounce time = %u us\n",
+	dev_err(pwrkey->dev, "HW debounce time = %u us\n",
 		pwrkey->sw_debounce_time_us);
+	if (pwrkey->user_debounce_time_us) {
+		pwrkey->sw_debounce_time_us = pwrkey->user_debounce_time_us;
+		dev_err(pwrkey->dev, "SW debounce time = %u us\n",
+			pwrkey->sw_debounce_time_us);
+	}
 
 	return 0;
 }
@@ -250,6 +259,7 @@ static int pm8941_pwrkey_probe(struct platform_device *pdev)
 	struct device_node *regmap_node;
 	const __be32 *addr;
 	u32 req_delay;
+	u32 user_time = 0;
 	unsigned int sts;
 	int error;
 
@@ -329,6 +339,15 @@ static int pm8941_pwrkey_probe(struct platform_device *pdev)
 		dev_dbg(&pdev->dev,
 			"no linux,code assuming power (%d)\n", error);
 		pwrkey->code = KEY_POWER;
+	}
+
+	error = of_property_read_u32(pdev->dev.of_node, "user_debounce_time_us", &user_time);
+	if (error){
+		pwrkey->user_debounce_time_us = 0;
+		dev_err(&pdev->dev, "user not set SW debounce time\n");
+	} else {
+		pwrkey->user_debounce_time_us = user_time;
+		dev_err(&pdev->dev, "user set SW debounce time =  %u us\n", pwrkey->user_debounce_time_us);
 	}
 
 	pwrkey->input = devm_input_allocate_device(&pdev->dev);

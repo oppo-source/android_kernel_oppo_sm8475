@@ -248,8 +248,10 @@ static void _retire_timestamp(struct kgsl_drawobj *drawobj)
 				context->id, drawobj->timestamp,
 				!!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 
-	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME)
+	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME) {
 		atomic64_inc(&context->proc_priv->frame_count);
+		atomic_inc(&context->proc_priv->period->frames);
+	}
 
 	/*
 	 * For A3xx we still get the rptr from the CP_RB_RPTR instead of
@@ -958,6 +960,7 @@ static inline void _decrement_submit_now(struct kgsl_device *device)
  *
  * Lock the dispatcher and call _adreno_dispatcher_issueibcmds
  */
+#ifndef OPLUS_FEATURE_DISPLAY
 static void adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 {
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
@@ -989,6 +992,7 @@ static void adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 done:
 	adreno_dispatcher_schedule(device);
 }
+#endif /* OPLUS_FEATURE_DISPLAY */
 
 /**
  * get_timestamp() - Return the next timestamp for the context
@@ -1400,7 +1404,11 @@ static int adreno_dispatcher_queue_cmds(struct kgsl_device_private *dev_priv,
 	 */
 
 	if (dispatch_q->inflight < _context_drawobj_burst)
+#ifdef OPLUS_FEATURE_DISPLAY
+		adreno_dispatcher_schedule(&(adreno_dev->dev));
+#else
 		adreno_dispatcher_issuecmds(adreno_dev);
+#endif /*OPLUS_FEATURE_DISPLAY*/
 done:
 	if (test_and_clear_bit(ADRENO_CONTEXT_FAULT, &context->priv))
 		return -EPROTO;
@@ -2031,6 +2039,11 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 		adreno_readreg64(adreno_dev, ADRENO_REG_CP_RB_BASE,
 			ADRENO_REG_CP_RB_BASE_HI, &base);
 
+#ifdef CONFIG_OPLUS_GPU_MINIDUMP
+//MULTIMEIDA.FEATURE.GPU.MINIDUMP, 2021/07/26, add for oplus gpu mini dump
+	device->snapshotfault = fault;
+#endif
+
 	/*
 	 * Force the CP off for anything but a hard fault to make sure it is
 	 * good and stopped
@@ -2176,7 +2189,8 @@ static void _print_recovery(struct kgsl_device *device,
 }
 
 static void cmdobj_profile_ticks(struct adreno_device *adreno_dev,
-	struct kgsl_drawobj_cmd *cmdobj, uint64_t *start, uint64_t *retire)
+	struct kgsl_drawobj_cmd *cmdobj, uint64_t *start, uint64_t *retire,
+	uint64_t *active)
 {
 	void *ptr = adreno_dev->profile_buffer->hostptr;
 	struct adreno_drawobj_profile_entry *entry;
@@ -2188,6 +2202,10 @@ static void cmdobj_profile_ticks(struct adreno_device *adreno_dev,
 	rmb();
 	*start = entry->started;
 	*retire = entry->retired;
+	if (ADRENO_GPUREV(adreno_dev) < 600)
+		*active = entry->retired - entry->started;
+	else
+		*active = entry->ctx_end - entry->ctx_start;
 }
 
 static void retire_cmdobj(struct adreno_device *adreno_dev,
@@ -2198,7 +2216,7 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 	struct adreno_context *drawctxt = ADRENO_CONTEXT(drawobj->context);
 	struct adreno_ringbuffer *rb = drawctxt->rb;
 	struct kgsl_context *context = drawobj->context;
-	uint64_t start = 0, end = 0;
+	uint64_t start = 0, end = 0, active = 0;
 	struct retire_info info = {0};
 
 	if (cmdobj->fault_recovery != 0) {
@@ -2207,7 +2225,7 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 	}
 
 	if (test_bit(CMDOBJ_PROFILE, &cmdobj->priv))
-		cmdobj_profile_ticks(adreno_dev, cmdobj, &start, &end);
+		cmdobj_profile_ticks(adreno_dev, cmdobj, &start, &end, &active);
 
 	info.inflight = (int)dispatcher->inflight;
 	info.rb_id = rb->id;
@@ -2215,14 +2233,22 @@ static void retire_cmdobj(struct adreno_device *adreno_dev,
 	info.timestamp = drawobj->timestamp;
 	info.sop = start;
 	info.eop = end;
+	info.active = active;
+
+	/* protected GPU work must not be reported */
+	if  (!(context->flags & KGSL_CONTEXT_SECURE))
+		kgsl_work_period_update(KGSL_DEVICE(adreno_dev),
+					     context->proc_priv->period, active);
 
 	msm_perf_events_update(MSM_PERF_GFX, MSM_PERF_RETIRED,
 			       pid_nr(context->proc_priv->pid),
 			       context->id, drawobj->timestamp,
 			       !!(drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME));
 
-	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME)
+	if (drawobj->flags & KGSL_DRAWOBJ_END_OF_FRAME) {
 		atomic64_inc(&context->proc_priv->frame_count);
+		atomic_inc(&context->proc_priv->period->frames);
+	}
 
 	/*
 	 * For A3xx we still get the rptr from the CP_RB_RPTR instead of

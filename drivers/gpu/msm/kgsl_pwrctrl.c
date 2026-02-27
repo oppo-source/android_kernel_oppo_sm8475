@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
  * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/interconnect.h>
@@ -15,6 +16,7 @@
 
 #include "kgsl_device.h"
 #include "kgsl_bus.h"
+#include "kgsl_power_trace.h"
 #include "kgsl_pwrscale.h"
 #include "kgsl_sysfs.h"
 #include "kgsl_trace.h"
@@ -250,7 +252,7 @@ void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 			pwr->previous_pwrlevel,
 			pwr->pwrlevels[old_level].gpu_freq);
 
-	trace_gpu_frequency(pwrlevel->gpu_freq/1000, 0);
+	KGSL_TRACE_GPU_FREQ(pwrlevel->gpu_freq/1000, 0);
 
 	/*  Update the bus after GPU clock decreases. */
 	if (new_level > old_level)
@@ -807,6 +809,36 @@ static ssize_t bus_split_store(struct device *dev,
 	return count;
 }
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+static ssize_t bus_nolimit_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	struct kgsl_device *device = dev_get_drvdata(dev);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n",
+		device->pwrctrl.bus_nolimit ? 1 : 0);
+}
+
+static ssize_t bus_nolimit_store(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	unsigned int val = 0;
+	struct kgsl_device *device = dev_get_drvdata(dev);
+	int ret;
+
+	ret = kstrtou32(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	mutex_lock(&device->mutex);
+	device->pwrctrl.bus_nolimit = val ? true : false;
+	mutex_unlock(&device->mutex);
+
+	return count;
+}
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
+
 static ssize_t default_pwrlevel_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
@@ -1106,6 +1138,9 @@ static DEVICE_ATTR_RW(force_clk_on);
 static DEVICE_ATTR_RW(force_bus_on);
 static DEVICE_ATTR_RW(force_rail_on);
 static DEVICE_ATTR_RW(bus_split);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+static DEVICE_ATTR_RW(bus_nolimit);
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 static DEVICE_ATTR_RW(default_pwrlevel);
 static DEVICE_ATTR_RO(popp);
 static DEVICE_ATTR_RW(force_no_nap);
@@ -1135,6 +1170,9 @@ static const struct attribute *pwrctrl_attr_list[] = {
 	&dev_attr_force_no_nap.attr,
 	&dev_attr_bus_split.attr,
 	&dev_attr_default_pwrlevel.attr,
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	&dev_attr_bus_nolimit.attr,
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 	&dev_attr_popp.attr,
 	&dev_attr_gpu_busy_percentage.attr,
 	&dev_attr_min_clock_mhz.attr,
@@ -1586,6 +1624,9 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 		if (freq >= pwr->pwrlevels[i].gpu_freq)
 			pwr->pwrlevels[i].gpu_freq = freq;
 	}
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	pwr->bus_nolimit = false;
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 
 	clk_set_rate(pwr->grp_clks[0],
 		pwr->pwrlevels[pwr->num_pwrlevels - 1].gpu_freq);
@@ -1875,7 +1916,7 @@ static int _wake(struct kgsl_device *device)
 		kgsl_pwrctrl_axi(device, true);
 		kgsl_pwrscale_wake(device);
 		kgsl_pwrctrl_irq(device, true);
-		trace_gpu_frequency(
+		KGSL_TRACE_GPU_FREQ(
 			pwr->pwrlevels[pwr->active_pwrlevel].gpu_freq/1000, 0);
 		fallthrough;
 	case KGSL_STATE_MINBW:
@@ -2049,7 +2090,7 @@ _slumber(struct kgsl_device *device)
 		kgsl_pwrctrl_clk_set_options(device, false);
 		kgsl_pwrctrl_disable(device);
 		kgsl_pwrscale_sleep(device);
-		trace_gpu_frequency(0, 0);
+		KGSL_TRACE_GPU_FREQ(0, 0);
 		kgsl_pwrctrl_set_state(device, KGSL_STATE_SLUMBER);
 		break;
 	case KGSL_STATE_SUSPEND:
@@ -2059,7 +2100,7 @@ _slumber(struct kgsl_device *device)
 		break;
 	case KGSL_STATE_AWARE:
 		kgsl_pwrctrl_disable(device);
-		trace_gpu_frequency(0, 0);
+		KGSL_TRACE_GPU_FREQ(0, 0);
 		kgsl_pwrctrl_set_state(device, KGSL_STATE_SLUMBER);
 		break;
 	default:
