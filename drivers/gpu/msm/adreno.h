@@ -28,8 +28,6 @@
 /* Used to inform CP where to save preemption counter data at the time of switch out */
 #define SET_PSEUDO_COUNTER 4
 
-/* Index to preemption scratch buffer to store KMD postamble */
-#define KMD_POSTAMBLE_IDX 100
 /* Index to preemption scratch buffer to store current QOS value */
 #define QOS_VALUE_IDX KGSL_PRIORITY_MAX_RB_LEVELS
 
@@ -736,10 +734,14 @@ enum adreno_device_flags {
  * kernel profiling buffer
  * @started: Number of GPU ticks at start of the drawobj
  * @retired: Number of GPU ticks at the end of the drawobj
+ * @ctx_start: CP_ALWAYS_ON_CONTEXT tick at start of the drawobj
+ * @ctx_end: CP_ALWAYS_ON_CONTEXT tick at end of the drawobj
  */
 struct adreno_drawobj_profile_entry {
 	uint64_t started;
 	uint64_t retired;
+	uint64_t ctx_start;
+	uint64_t ctx_end;
 };
 
 #define ADRENO_DRAWOBJ_PROFILE_OFFSET(_index, _member) \

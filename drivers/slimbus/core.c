@@ -446,8 +446,8 @@ static int slim_device_alloc_laddr(struct slim_device *sbdev,
 		if (ret < 0)
 			goto err;
 	} else if (report_present) {
-		ret = ida_simple_get(&ctrl->laddr_ida,
-				     0, SLIM_LA_MANAGER - 1, GFP_KERNEL);
+		ret = ida_alloc_max(&ctrl->laddr_ida,
+				    SLIM_LA_MANAGER - 1, GFP_KERNEL);
 		if (ret < 0)
 			goto err;
 
@@ -502,6 +502,14 @@ int slim_device_report_present(struct slim_controller *ctrl,
 	int ret;
 
 	ret = pm_runtime_get_sync(ctrl->dev);
+	if (ret < 0) {
+		dev_err(ctrl->dev, "slim %s: PM get_sync failed ret :%d\n",
+			__func__, ret);
+		pm_runtime_put_noidle(ctrl->dev);
+		/* Set device in suspended since resume failed */
+		pm_runtime_set_suspended(ctrl->dev);
+		return ret;
+	}
 
 	if (ctrl->sched.clk_state != SLIM_CLK_ACTIVE) {
 		dev_err(ctrl->dev, "slim ctrl not active,state:%d, ret:%d\n",
