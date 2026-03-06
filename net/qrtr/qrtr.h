@@ -12,6 +12,8 @@ struct sk_buff;
 
 #define QRTR_DEL_PROC_MAGIC	0xe111
 
+#define MAX_NON_WAKE_SVC_LEN    5
+
 /**
  * struct qrtr_endpoint - endpoint handle
  * @xmit: Callback for outgoing packets
@@ -24,6 +26,9 @@ struct qrtr_endpoint {
 	int (*xmit)(struct qrtr_endpoint *ep, struct sk_buff *skb);
 	/* private: not for endpoint use */
 	struct qrtr_node *node;
+	#ifdef CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG
+	struct device *dev;
+	#endif
 };
 
 /**
@@ -45,9 +50,7 @@ void qrtr_endpoint_unregister(struct qrtr_endpoint *ep);
 
 int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len);
 
-int qrtr_peek_pkt_size(const void *data);
-
-void qrtr_ns_init(void);
+int qrtr_ns_init(void);
 
 void qrtr_ns_remove(void);
 

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2002,2007-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <asm/cacheflush.h>
@@ -15,6 +17,10 @@
 #include "kgsl_pool.h"
 #include "kgsl_reclaim.h"
 #include "kgsl_sharedmem.h"
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_OSVELTE)
+#include "common.h"
+#endif /* CONFIG_OPLUS_FEATURE_MM_OSVELTE */
 
 /*
  * The user can set this from debugfs to force failed memory allocations to
@@ -194,12 +200,12 @@ static ssize_t memtype_sysfs_show(struct kobject *kobj,
 		if (type == memtype->type)
 			size += memdesc->size;
 
-		kgsl_mem_entry_put(entry);
+		kgsl_mem_entry_put_deferred(entry);
 		spin_lock(&priv->mem_lock);
 	}
 	spin_unlock(&priv->mem_lock);
 
-	queue_work(kgsl_driver.mem_workqueue, &work->work);
+	queue_work(kgsl_driver.lockless_workqueue, &work->work);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", size);
 }
@@ -268,13 +274,23 @@ imported_mem_show(struct kgsl_process_private *priv,
 				imported_mem += size;
 			}
 		}
-
-		kgsl_mem_entry_put(entry);
+		/*
+		 * If refcount on mem entry is the last refcount, we will
+		 * call kgsl_mem_entry_destroy and detach it from process
+		 * list. When there is no refcount on the process private,
+		 * we will call kgsl_destroy_process_private to do cleanup.
+		 * During cleanup, we will try to remove the same sysfs
+		 * node which is in use by the current thread and this
+		 * situation will end up in a deadloack.
+		 * To avoid this situation, use a worker to put the refcount
+		 * on mem entry.
+		 */
+		kgsl_mem_entry_put_deferred(entry);
 		spin_lock(&priv->mem_lock);
 	}
 	spin_unlock(&priv->mem_lock);
 
-	queue_work(kgsl_driver.mem_workqueue, &work->work);
+	queue_work(kgsl_driver.lockless_workqueue, &work->work);
 
 	return scnprintf(buf, PAGE_SIZE, "%llu\n", imported_mem);
 }
@@ -1025,6 +1041,9 @@ static void kgsl_contiguous_free(struct kgsl_memdesc *memdesc)
 	if (!memdesc->hostptr)
 		return;
 
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
+
 	atomic_long_sub(memdesc->size, &kgsl_driver.stats.coherent);
 
 	_kgsl_contiguous_free(memdesc);
@@ -1260,7 +1279,12 @@ static void kgsl_free_secure_system_pages(struct kgsl_memdesc *memdesc)
 {
 	int i;
 	struct scatterlist *sg;
-	int ret = unlock_sgt(memdesc->sgt);
+	int ret;
+
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
+
+	ret = unlock_sgt(memdesc->sgt);
 
 	if (ret) {
 		/*
@@ -1290,7 +1314,12 @@ static void kgsl_free_secure_system_pages(struct kgsl_memdesc *memdesc)
 
 static void kgsl_free_secure_pages(struct kgsl_memdesc *memdesc)
 {
-	int ret = unlock_sgt(memdesc->sgt);
+	int ret;
+
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
+
+	ret = unlock_sgt(memdesc->sgt);
 
 	if (ret) {
 		/*
@@ -1320,6 +1349,9 @@ static void kgsl_free_pages(struct kgsl_memdesc *memdesc)
 	kgsl_paged_unmap_kernel(memdesc);
 	WARN_ON(memdesc->hostptr);
 
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
+
 	atomic_long_sub(memdesc->size, &kgsl_driver.stats.page_alloc);
 
 	_kgsl_free_pages(memdesc, memdesc->page_count);
@@ -1337,6 +1369,9 @@ static void kgsl_free_system_pages(struct kgsl_memdesc *memdesc)
 
 	kgsl_paged_unmap_kernel(memdesc);
 	WARN_ON(memdesc->hostptr);
+
+	if (memdesc->priv & KGSL_MEMDESC_MAPPED)
+		return;
 
 	atomic_long_sub(memdesc->size, &kgsl_driver.stats.page_alloc);
 
@@ -1774,3 +1809,50 @@ void kgsl_free_globals(struct kgsl_device *device)
 		kfree(md);
 	}
 }
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_MM_OSVELTE)
+
+void dump_kgsl_process_mem_detail(struct kgsl_process_private *priv)
+{
+	int i = 0;
+	int id = 0;
+	struct kgsl_mem_entry *entry = NULL;
+	uint64_t memtype_detail[KGSL_MEMTYPE_KERNEL + 1] = {0};
+
+	spin_lock(&priv->mem_lock);
+	for (entry = idr_get_next(&priv->mem_idr, &id); entry;
+		id++, entry = idr_get_next(&priv->mem_idr, &id)) {
+		struct kgsl_memdesc *memdesc;
+		unsigned int type;
+
+		if (!kgsl_mem_entry_get(entry))
+			continue;
+
+		/*
+		 * we must unlock the mem_lock
+		 * This is to avoid a deadlock where we put back last reference of the
+		 * process mem entry (via kgsl_mem_entry_put_deferred)
+		 */
+		spin_unlock(&priv->mem_lock);
+
+		memdesc = &entry->memdesc;
+		type = kgsl_memdesc_get_memtype(memdesc);
+
+		if (type <= KGSL_MEMTYPE_KERNEL)
+			memtype_detail[type] += memdesc->size;
+
+		kgsl_mem_entry_put_deferred(entry);
+		spin_lock(&priv->mem_lock);
+	}
+	spin_unlock(&priv->mem_lock);
+
+	osvelte_info("%-16s %-5s \n", "memtype", "size");
+
+	for (i = 0; i <= KGSL_MEMTYPE_KERNEL; i++) {
+		if (memtype_detail[i] > 0) {
+			osvelte_info("%-16d %-5llu\n", i, memtype_detail[i] / SZ_1K);
+		}
+	}
+}
+
+#endif /* CONFIG_OPLUS_FEATURE_MM_OSVELTE */
